@@ -1,20 +1,18 @@
-use pulldown_cmark::{Options, Parser, html};
-use regex::{Captures, Regex};
+use pulldown_cmark::{Parser, html};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
     fs,
     path::{Path, PathBuf},
-    time::SystemTime,
 };
 use thiserror::Error;
 use time::OffsetDateTime;
 use ulid::Ulid;
 
 #[derive(Default, Debug, Serialize, Deserialize)]
-struct Frontmatter {
-    title: String,
-    tags: Option<HashSet<String>>,
+pub struct Frontmatter {
+    pub title: String,
+    pub tags: Option<HashSet<String>>,
 }
 
 #[derive(Debug)]
@@ -36,8 +34,6 @@ pub enum PageError {
     TomlSerialize(#[from] toml::ser::Error),
     #[error("YAML error: {0}")]
     YAMLDeserialize(#[from] serde_yaml::Error),
-    #[error("Markdown render error")]
-    Render,
 }
 
 impl Page {
@@ -75,37 +71,41 @@ impl Page {
 
     fn split_frontmatter(content: &str) -> Result<(Frontmatter, String), PageError> {
         let mut lines = content.lines();
-        if lines.next()? != "---" {
+        if lines.next() != Some("---") {
             return Ok((Frontmatter::default(), content.to_string()));
         }
 
         let mut frontmatter = String::new();
+        let mut frontmatter_count = 0;
         for line in lines.by_ref() {
             if line == "---" {
                 break;
             }
             frontmatter.push_str(line);
             frontmatter.push('\n');
+            frontmatter_count += 1;
         }
+
+        let markdown = lines
+            .skip(frontmatter_count - 2)
+            .fold(String::new(), |mut result, value| {
+                result.push_str(value);
+                result.push('\n');
+                result
+            })
+            .trim()
+            .to_string();
 
         let frontmatter: Frontmatter = serde_yaml::from_str(&frontmatter)?;
 
-        Ok((frontmatter, lines))
+        Ok((frontmatter, markdown))
     }
 
     fn render_markdown(markdown: &str) -> Result<String, PageError> {
         let parser = Parser::new(markdown);
-        let mut html_output = String::new();
-        html::push_html(&mut html_output, parser);
-
-        let re = Regex::new(r"\[\[([^\]\]]+)\]\]").unwrap();
-        let html_with_links = re.replace_all(&html_output, |caps: &Captures| {
-            let title = &caps[1];
-            let slug = title.replace(' ', "-").to_lowercase();
-            format!(r#"<a href="/{}">{}</a>"#, slug, title)
-        });
-
-        Ok(html_with_links.to_string())
+        let mut html = String::new();
+        html::push_html(&mut html, parser);
+        Ok(html.trim().to_string())
     }
 
     fn path_to_url(path: &Path) -> PathBuf {
@@ -124,22 +124,26 @@ mod tests {
     fn test_frontmatter_parsing() {
         let content = r#"---
 title: "Test Page"
-tags = ["rust", "axum"]
+tags: ["rust", "axum"]
 ---
-# Content"#;
+# Content
+
+Some other text
+"#;
 
         let (fm, md) = Page::split_frontmatter(content).unwrap();
+        dbg!(&fm, &md);
         assert_eq!(fm.title, "Test Page");
         assert_eq!(
             fm.tags.unwrap(),
             HashSet::from(["rust".into(), "axum".into()])
         );
-        assert_eq!(md.trim(), "# Content");
+        assert_eq!(md.trim(), "# Content\n\nSome other text");
     }
 
     #[test]
     fn test_link_rendering() {
-        let md = "[[About Page]]";
+        let md = "[About Page](/about-page)";
         let html = Page::render_markdown(md).unwrap();
         assert_eq!(html, r#"<p><a href="/about-page">About Page</a></p>"#);
     }

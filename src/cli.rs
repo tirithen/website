@@ -1,15 +1,20 @@
+use anyhow::Result;
 use clap::Parser;
 
-/// website server command-line interface
+use crate::web::start_server;
+
+/// Website server command-line interface
 #[derive(Parser, Debug)]
 #[command(
     author,
     version,
     about,
-    long_about = "High-performance personal blog server with Markdown support",
+    long_about = "Simple to use. High-performance website server with Markdown support",
     propagate_version = true
 )]
-pub struct Cli;
+pub struct Cli {
+    
+};
 
 impl Cli {
     /// Parse command-line arguments with Clap
@@ -17,9 +22,9 @@ impl Cli {
         Self::parse()
     }
 
-    /// Start production server with configured parameters
-    pub fn start_production_server(&self) {
+    /// Start web server
+    pub async fn start(&self) -> Result<()> {
         tracing::info!("🚀 Starting website server in production mode...");
-        // Implementation will integrate with Config::load()
+        start_server().await
     }
 }

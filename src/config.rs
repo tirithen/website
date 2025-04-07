@@ -68,7 +68,7 @@ impl From<ConfigParsed> for Config {
                     .unwrap_or(PathBuf::from_str("./data").unwrap())
                     .join("website/"),
             ),
-            log_level: ConfigLogLevel::Warn,
+            log_level: ConfigLogLevel::Info,
         }
     }
 }
