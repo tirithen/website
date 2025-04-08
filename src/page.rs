@@ -11,14 +11,14 @@ use ulid::Ulid;
 
 #[derive(Default, Debug, Serialize, Deserialize)]
 pub struct Frontmatter {
-    pub title: String,
+    pub title: Option<String>,
     pub tags: Option<HashSet<String>>,
 }
 
 #[derive(Debug)]
 pub struct Page {
     pub id: Ulid,
-    pub title: String,
+    pub title: Option<String>,
     pub modified: OffsetDateTime,
     pub url: PathBuf,
     pub tags: HashSet<String>,
@@ -76,18 +76,15 @@ impl Page {
         }
 
         let mut frontmatter = String::new();
-        let mut frontmatter_count = 0;
         for line in lines.by_ref() {
             if line == "---" {
                 break;
             }
             frontmatter.push_str(line);
             frontmatter.push('\n');
-            frontmatter_count += 1;
         }
 
         let markdown = lines
-            .skip(frontmatter_count - 2)
             .fold(String::new(), |mut result, value| {
                 result.push_str(value);
                 result.push('\n');
@@ -105,6 +102,7 @@ impl Page {
         let parser = Parser::new(markdown);
         let mut html = String::new();
         html::push_html(&mut html, parser);
+        let html = ammonia::clean(&html);
         Ok(html.trim().to_string())
     }
 
@@ -133,7 +131,7 @@ Some other text
 
         let (fm, md) = Page::split_frontmatter(content).unwrap();
         dbg!(&fm, &md);
-        assert_eq!(fm.title, "Test Page");
+        assert_eq!(fm.title, Some("Test Page".into()));
         assert_eq!(
             fm.tags.unwrap(),
             HashSet::from(["rust".into(), "axum".into()])

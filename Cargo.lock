@@ -2581,6 +2581,7 @@ dependencies = [
  "clap",
  "derive-getters",
  "dirs",
+ "hyper",
  "meilisearch-sdk",
  "moka",
  "pulldown-cmark",
