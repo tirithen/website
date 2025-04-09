@@ -9,9 +9,19 @@ pub async fn error_handler(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<Response, (StatusCode, String)> {
+    let uri = request.uri().clone();
     let response = next.run(request).await;
 
     if response.status().is_client_error() || response.status().is_server_error() {
+        if response.status().is_server_error() {
+            tracing::error!(
+                "{} {} calling {}",
+                response.status().as_u16(),
+                response.status().canonical_reason().unwrap_or_default(),
+                uri
+            );
+        }
+
         let status = response.status();
         let html = render_error_page(status);
         return Ok(html.into_response());
