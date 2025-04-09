@@ -15,6 +15,7 @@ use tower_http::compression::CompressionLayer;
 use crate::{
     assets::{ASSET_MANAGER, asset_routes},
     config::{Config, load_config},
+    error_handler::error_handler,
     page::Page,
     security::add_security_headers,
 };
@@ -54,9 +55,10 @@ pub async fn start_server() -> anyhow::Result<()> {
             "/{*path}",
             get(page_handler).layer(CacheLayer::with_lifespan(1)),
         )
+        .layer(middleware::from_fn(error_handler))
         .layer(middleware::from_fn(add_security_headers))
-        .layer(compression_layer)
-        .layer(middleware::from_fn(add_performance_headers));
+        .layer(middleware::from_fn(add_performance_headers))
+        .layer(compression_layer);
     let address = format!("0.0.0.0:{}", config.port());
     let listener = tokio::net::TcpListener::bind(&address).await?;
 
@@ -138,6 +140,7 @@ fn full_page_html(page: &Page, config: &Config) -> String {
                 view-transition-name: article;
             }}
         </style>
+        <link rel="stylesheet" href="{}">
         <script type="module" src="{}"></script>
     </head>
     <body>
@@ -147,6 +150,7 @@ fn full_page_html(page: &Page, config: &Config) -> String {
     </body>
 </html>"#,
         formulate_title(page, config),
+        ASSET_MANAGER.hashed_route("styles.css").unwrap_or_default(),
         ASSET_MANAGER.hashed_route("script.js").unwrap_or_default(),
         &page.html
     )

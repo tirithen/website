@@ -5,6 +5,7 @@ use web::start_server;
 
 mod assets;
 mod config;
+mod error_handler;
 mod logger;
 mod page;
 mod security;
