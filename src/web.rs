@@ -4,28 +4,38 @@ use axum::{
     extract::{Path, Query, Request},
     http::{HeaderValue, StatusCode},
     middleware::{self, Next},
-    response::{Html, Response},
+    response::{Html, IntoResponse, Json, Response},
     routing::get,
 };
 use axum_response_cache::CacheLayer;
-use serde::Deserialize;
+use hyper::header;
+use serde::{Deserialize, Serialize};
 use tower_http::compression::CompressionLayer;
 
 use crate::{
+    assets::{ASSET_MANAGER, asset_routes},
     config::{Config, load_config},
     page::Page,
+    security::add_security_headers,
 };
 
-#[derive(Deserialize, Debug)]
+#[derive(Debug, Deserialize)]
 struct QueryParams {
     mode: Option<Mode>,
 }
 
-#[derive(Deserialize, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all(deserialize = "lowercase"))]
 enum Mode {
-    Partial,
+    Fragment,
     Edit,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all(serialize = "lowercase"))]
+struct Fragment {
+    title: Option<String>,
+    html: String,
 }
 
 pub async fn start_server() -> anyhow::Result<()> {
@@ -38,13 +48,15 @@ pub async fn start_server() -> anyhow::Result<()> {
         .zstd(true);
 
     let app = Router::new()
+        .merge(asset_routes())
         .route("/", get(page_handler).layer(CacheLayer::with_lifespan(1)))
         .route(
             "/{*path}",
             get(page_handler).layer(CacheLayer::with_lifespan(1)),
         )
-        .layer(middleware::from_fn(add_performance_headers))
-        .layer(compression_layer);
+        .layer(middleware::from_fn(add_security_headers))
+        .layer(compression_layer)
+        .layer(middleware::from_fn(add_performance_headers));
     let address = format!("0.0.0.0:{}", config.port());
     let listener = tokio::net::TcpListener::bind(&address).await?;
 
@@ -57,14 +69,20 @@ pub async fn start_server() -> anyhow::Result<()> {
 async fn page_handler(
     path: Option<Path<String>>,
     Query(query): Query<QueryParams>,
-) -> Result<Html<String>, StatusCode> {
+) -> Result<impl IntoResponse, StatusCode> {
     let config = load_config();
     let page = page_content(path, &config)?;
 
-    if query.mode == Some(Mode::Partial) {
-        Ok(Html(page.html))
+    if query.mode == Some(Mode::Fragment) {
+        let fragment = Fragment {
+            title: page.title,
+            html: format!("<main><article>{}</article></main>", page.html),
+        };
+        let data =
+            serde_json::to_string(&fragment).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        Ok(Json(data).into_response())
     } else {
-        Ok(Html(full_page_html(&page, &config)))
+        Ok(Html(full_page_html(&page, &config)).into_response())
     }
 }
 
@@ -109,19 +127,27 @@ fn full_page_html(page: &Page, config: &Config) -> String {
             }}
 
             ::view-transition-old(root),
-            ::view-transition-new(root) {{
+            ::view-transition-new(root),
+            ::view-transition-old(article),
+            ::view-transition-new(article) {{
                 animation-duration: 50ms;
                 animation-timing-function: ease-in-out;
             }}
+
+            article {{
+                view-transition-name: article;
+            }}
         </style>
+        <script type="module" src="{}"></script>
     </head>
     <body>
         <main>
-            {}
+            <article>{}</article>
         </main>
     </body>
 </html>"#,
         formulate_title(page, config),
+        ASSET_MANAGER.hashed_route("script.js").unwrap_or_default(),
         &page.html
     )
 }
@@ -136,7 +162,12 @@ fn formulate_title(page: &Page, config: &Config) -> String {
 
 async fn add_performance_headers(request: Request<Body>, next: Next) -> Response {
     let mut response = next.run(request).await;
-    let headers = response.headers_mut();
-    headers.insert("View-Transition", HeaderValue::from_static("same-origin"));
+    if let Some(content_type) = response.headers().get(header::CONTENT_TYPE) {
+        if content_type == "text/html" {
+            response
+                .headers_mut()
+                .insert("View-Transition", HeaderValue::from_static("same-origin"));
+        }
+    }
     response
 }

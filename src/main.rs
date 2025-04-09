@@ -3,9 +3,11 @@ use config::load_config;
 use logger::init_logging;
 use web::start_server;
 
+mod assets;
 mod config;
 mod logger;
 mod page;
+mod security;
 mod web;
 
 #[tokio::main]
