@@ -1,4 +1,5 @@
 use pulldown_cmark::{Parser, html};
+use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
@@ -11,6 +12,7 @@ use ulid::Ulid;
 
 #[derive(Default, Debug, Serialize, Deserialize)]
 pub struct Frontmatter {
+    pub id: Option<Ulid>,
     pub title: Option<String>,
     pub tags: Option<HashSet<String>>,
 }
@@ -46,9 +48,16 @@ impl Page {
         let html = Self::render_markdown(&markdown)?;
         let url = Self::path_to_url(path);
 
+        let title = if frontmatter.title.is_some() {
+            frontmatter.title
+        } else {
+            let document = Html::parse_document(&html);
+            Self::extract_h1_title(&document)
+        };
+
         Ok(Self {
-            id: Ulid::new(),
-            title: frontmatter.title,
+            id: frontmatter.id.unwrap_or_else(Ulid::new),
+            title,
             modified: OffsetDateTime::from(modified),
             url,
             tags: frontmatter.tags.unwrap_or_default(),
@@ -60,13 +69,27 @@ impl Page {
     pub fn write(&self, base_path: &Path) -> Result<(), PageError> {
         let path = base_path.join(&self.url).with_extension("md");
         let frontmatter = toml::to_string(&Frontmatter {
+            id: Some(Ulid::new()),
             title: self.title.clone(),
             tags: Some(self.tags.clone()),
         })?;
 
-        let content = format!("---\n{}\n---\n{}", frontmatter, self.markdown);
+        let content = format!(
+            "---\n{}\n---\n{}",
+            ammonia::clean(&frontmatter),
+            ammonia::clean(&self.markdown)
+        );
         fs::write(path, content)?;
         Ok(())
+    }
+
+    fn extract_h1_title(document: &Html) -> Option<String> {
+        let selector = Selector::parse("h1").unwrap();
+        document
+            .select(&selector)
+            .next()
+            .map(|h1| h1.text().collect::<String>())
+            .map(|s| s.trim().to_string())
     }
 
     fn split_frontmatter(content: &str) -> Result<(Frontmatter, String), PageError> {

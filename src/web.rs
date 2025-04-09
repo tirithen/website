@@ -11,6 +11,7 @@ use axum_response_cache::CacheLayer;
 use hyper::header;
 use serde::{Deserialize, Serialize};
 use tower_http::compression::CompressionLayer;
+use ulid::Ulid;
 
 use crate::{
     assets::{ASSET_MANAGER, asset_routes},
@@ -35,6 +36,7 @@ enum Mode {
 #[derive(Debug, Serialize)]
 #[serde(rename_all(serialize = "lowercase"))]
 struct Fragment {
+    id: Ulid,
     title: Option<String>,
     html: String,
 }
@@ -77,6 +79,7 @@ async fn page_handler(
 
     if query.mode == Some(Mode::Fragment) {
         let fragment = Fragment {
+            id: page.id,
             title: page.title,
             html: format!("<main><article>{}</article></main>", page.html),
         };
