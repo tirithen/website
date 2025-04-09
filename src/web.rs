@@ -1,3 +1,5 @@
+use std::{collections::HashSet, path::PathBuf};
+
 use axum::{
     Router,
     body::Body,
@@ -10,6 +12,7 @@ use axum::{
 use axum_response_cache::CacheLayer;
 use hyper::header;
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 use tower_http::compression::CompressionLayer;
 use ulid::Ulid;
 
@@ -39,6 +42,9 @@ struct Fragment {
     id: Ulid,
     title: Option<String>,
     html: String,
+    #[serde(with = "time::serde::iso8601")]
+    modified: OffsetDateTime,
+    tags: HashSet<String>,
 }
 
 pub async fn start_server() -> anyhow::Result<()> {
@@ -82,10 +88,10 @@ async fn page_handler(
             id: page.id,
             title: page.title,
             html: format!("<main><article>{}</article></main>", page.html),
+            modified: page.modified,
+            tags: page.tags,
         };
-        let data =
-            serde_json::to_string(&fragment).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        Ok(Json(data).into_response())
+        Ok(Json(&fragment).into_response())
     } else {
         Ok(Html(full_page_html(&page, &config)).into_response())
     }

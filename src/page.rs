@@ -9,6 +9,7 @@ use std::{
 use thiserror::Error;
 use time::OffsetDateTime;
 use ulid::Ulid;
+use xxhash_rust::xxh3::xxh3_128;
 
 #[derive(Default, Debug, Serialize, Deserialize)]
 pub struct Frontmatter {
@@ -52,12 +53,14 @@ impl Page {
             frontmatter.title
         } else {
             let document = Html::parse_document(&html);
-            Self::extract_h1_title(&document)
+            Self::extract_header_title(&document)
         };
 
         Ok(Self {
-            id: frontmatter.id.unwrap_or_else(Ulid::new),
-            title,
+            title: title.clone(),
+            id: frontmatter
+                .id
+                .unwrap_or_else(|| ulid_from_string(&title.unwrap_or_default())),
             modified: OffsetDateTime::from(modified),
             url,
             tags: frontmatter.tags.unwrap_or_default(),
@@ -83,8 +86,8 @@ impl Page {
         Ok(())
     }
 
-    fn extract_h1_title(document: &Html) -> Option<String> {
-        let selector = Selector::parse("h1").unwrap();
+    fn extract_header_title(document: &Html) -> Option<String> {
+        let selector = Selector::parse("h1,h2,h3,h4,h5,h6,p").unwrap();
         document
             .select(&selector)
             .next()
@@ -135,6 +138,11 @@ impl Page {
             .with_extension("")
             .to_path_buf()
     }
+}
+
+fn ulid_from_string(input: &str) -> Ulid {
+    let hash = xxh3_128(input.as_bytes());
+    Ulid::from_parts(0, hash)
 }
 
 #[cfg(test)]
