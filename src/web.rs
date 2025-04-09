@@ -20,7 +20,8 @@ use crate::{
     assets::{ASSET_MANAGER, asset_routes},
     config::{Config, load_config},
     error_handler::error_handler,
-    page::Page,
+    page::{Page, PageError},
+    search::SearchIndex,
     security::add_security_headers,
 };
 
@@ -50,6 +51,13 @@ struct Fragment {
 pub async fn start_server() -> anyhow::Result<()> {
     let config = load_config();
 
+    let search = SearchIndex::new(&config.data_path().join("search-index"))?;
+
+    dbg!("before");
+    let p = Page::read("players.md")?;
+    dbg!(&p);
+    search.index_page(&p)?;
+
     let compression_layer = CompressionLayer::new()
         .gzip(true)
         .deflate(true)
@@ -58,6 +66,7 @@ pub async fn start_server() -> anyhow::Result<()> {
 
     let app = Router::new()
         .merge(asset_routes())
+        .merge(search.search_route())
         .route("/", get(page_handler).layer(CacheLayer::with_lifespan(1)))
         .route(
             "/{*path}",

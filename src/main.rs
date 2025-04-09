@@ -8,6 +8,7 @@ mod config;
 mod error_handler;
 mod logger;
 mod page;
+mod search;
 mod security;
 mod web;
 

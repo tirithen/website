@@ -11,6 +11,8 @@ use time::OffsetDateTime;
 use ulid::Ulid;
 use xxhash_rust::xxh3::xxh3_128;
 
+use crate::config::load_config;
+
 #[derive(Default, Debug, Serialize, Deserialize)]
 pub struct Frontmatter {
     pub id: Option<Ulid>,
@@ -40,14 +42,15 @@ pub enum PageError {
 }
 
 impl Page {
-    pub fn read(path: &Path) -> Result<Self, PageError> {
-        let content = fs::read_to_string(path)?;
-        let modified = fs::metadata(path)?.modified()?;
+    pub fn read(path: impl Into<PathBuf>) -> Result<Self, PageError> {
+        let path = path.into();
+        let content = fs::read_to_string(&path)?;
+        let modified = fs::metadata(&path)?.modified()?;
 
         let (frontmatter, markdown) = Self::split_frontmatter(&content)?;
 
         let html = Self::render_markdown(&markdown)?;
-        let url = Self::path_to_url(path);
+        let url = Self::path_to_url(&path);
 
         let title = if frontmatter.title.is_some() {
             frontmatter.title
@@ -133,7 +136,10 @@ impl Page {
     }
 
     fn path_to_url(path: &Path) -> PathBuf {
-        path.strip_prefix("pages")
+        let config = load_config();
+        path.strip_prefix(config.data_path())
+            .unwrap_or(path)
+            .strip_prefix("pages")
             .unwrap_or(path)
             .with_extension("")
             .to_path_buf()
