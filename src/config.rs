@@ -1,4 +1,4 @@
-use std::{path::PathBuf, str::FromStr};
+use std::{path::PathBuf, str::FromStr, time::Duration};
 
 use cached::proc_macro::cached;
 use derive_getters::Getters;
@@ -42,6 +42,7 @@ pub struct ConfigParsed {
     port: Option<u16>,
     data_path: Option<PathBuf>,
     log_level: Option<ConfigLogLevel>,
+    search_reindex_interval: Option<Duration>,
 }
 
 #[derive(Clone, Getters, Serialize)]
@@ -50,11 +51,20 @@ pub struct Config {
     port: u16,
     data_path: PathBuf,
     log_level: ConfigLogLevel,
+    search_reindex_interval: Duration,
 }
 
 impl Config {
     pub fn log_path(&self) -> PathBuf {
         self.data_path.join("logs")
+    }
+
+    pub fn pages_path(&self) -> PathBuf {
+        self.data_path.join("pages")
+    }
+
+    pub fn search_path(&self) -> PathBuf {
+        self.data_path.join("search")
     }
 }
 
@@ -69,12 +79,14 @@ impl From<ConfigParsed> for Config {
                     .join("website/"),
             ),
             log_level: ConfigLogLevel::Info,
+            search_reindex_interval: Duration::from_secs(30 * 60),
         }
     }
 }
 
 #[repr(usize)]
 #[derive(Default, Copy, Clone, Debug, Hash, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename(deserialize = "lowercase", serialize = "lowercase"))]
 pub enum ConfigLogLevel {
     #[default]
     Error,

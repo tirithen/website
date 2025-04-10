@@ -1,4 +1,8 @@
-use std::{io::Cursor, path::Path};
+use std::{
+    io::Cursor,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use anyhow::Result;
 use axum::{Router, extract::Query, response::Html, routing::get};
@@ -6,40 +10,92 @@ use heed::EnvOpenOptions;
 use milli::{
     Index, Search, SearchResult,
     documents::{DocumentsBatchBuilder, DocumentsBatchReader},
-    update::{IndexDocuments, IndexDocumentsConfig, IndexerConfig, Settings},
+    update::{ClearDocuments, IndexDocuments, IndexDocumentsConfig, IndexerConfig, Settings},
 };
 use serde::Deserialize;
 use serde_json::Value;
+use tokio::time::interval;
 
-use crate::page::Page;
+use crate::{config::Config, page::Page};
 
 #[derive(Deserialize)]
 struct SearchParams {
     q: String,
 }
 
+pub fn spawn_search_indexer(config: &Config) -> Result<SearchIndex> {
+    let search_index = SearchIndex::new(&config.search_path())?;
+    let mut search_index_background = search_index.clone();
+
+    tokio::spawn(async move {
+        if let Err(e) = search_index_background.reindex().await {
+            tracing::error!("💥 Initial reindex failed: {}", e);
+        }
+
+        let mut interval = interval(Duration::from_secs(30 * 60));
+        loop {
+            interval.tick().await;
+            if let Err(e) = search_index_background.reindex().await {
+                tracing::error!("💥 Periodic reindex failed: {}", e);
+            }
+        }
+    });
+
+    Ok(search_index)
+}
+
+fn create_or_open_index(path: &Path) -> Result<Index> {
+    std::fs::create_dir_all(path)?;
+
+    let mut options = EnvOpenOptions::new();
+    options.map_size(100 * 1024 * 1024);
+    options.max_dbs(1);
+    let options = options.read_txn_without_tls();
+    let index = Index::new(options, path, true)?;
+
+    let mut wtxn = index.write_txn()?;
+    let config = IndexerConfig::default();
+    let mut builder = Settings::new(&mut wtxn, &index, &config);
+    builder.set_searchable_fields(vec!["title".into(), "markdown".into()]);
+    builder.execute(|_| (), || false)?;
+    wtxn.commit()?;
+
+    Ok(index)
+}
+
 #[derive(Clone)]
 pub struct SearchIndex {
-    index: Index,
+    active_index: Index,
+    staging_index: Index,
+    active_path: PathBuf,
+    staging_path: PathBuf,
 }
 
 impl SearchIndex {
     pub fn new(path: &Path) -> Result<Self> {
-        std::fs::create_dir_all(path)?;
-        let mut options = EnvOpenOptions::new();
-        options.map_size(100 * 1024 * 1024);
-        options.max_dbs(1);
-        let options = options.read_txn_without_tls();
-        let index = Index::new(options, path, true)?;
+        let active_path = path.join("active");
+        let staging_path = path.join("staging");
 
-        let mut wtxn = index.write_txn()?;
-        let config = IndexerConfig::default();
-        let mut builder = Settings::new(&mut wtxn, &index, &config);
-        builder.set_searchable_fields(vec!["markdown".into()]);
-        builder.execute(|_| (), || false)?;
-        wtxn.commit().unwrap();
+        let active_index = create_or_open_index(&active_path)?;
+        let staging_index = create_or_open_index(&staging_path)?;
 
-        Ok(Self { index })
+        Ok(Self {
+            active_index,
+            staging_index,
+            active_path,
+            staging_path,
+        })
+    }
+
+    pub async fn reindex(&mut self) -> Result<()> {
+        tracing::info!("🔎 Re-creating index");
+        tracing::debug!("sdfdsf");
+        self.clear_staging()?;
+        for page in Page::all() {
+            self.index_page_to(&page, &self.staging_index)?;
+        }
+        self.swap_indicies()?;
+        Ok(())
     }
 
     pub fn search_route(&self) -> Router {
@@ -55,15 +111,16 @@ impl SearchIndex {
     }
 
     pub fn search(&self, query: &str) -> Result<Vec<serde_json::Value>> {
-        let rtxn = self.index.read_txn()?;
+        tracing::debug!("Searching with query: {}", query);
+        let rtxn = self.active_index.read_txn()?;
 
-        let mut search = Search::new(&rtxn, &self.index);
+        let mut search = Search::new(&rtxn, &self.active_index);
         search.query(query);
         search.limit(10);
 
         let results: SearchResult = search.execute()?;
-        let documents = self.index.documents(&rtxn, results.documents_ids)?;
-        let fields_map = self.index.fields_ids_map(&rtxn)?;
+        let documents = self.active_index.documents(&rtxn, results.documents_ids)?;
+        let fields_map = self.active_index.fields_ids_map(&rtxn)?;
 
         let mut output = Vec::new();
         for (_id, obkv_doc) in documents.iter() {
@@ -86,7 +143,35 @@ impl SearchIndex {
     }
 
     pub fn index_page(&self, page: &Page) -> Result<()> {
-        let mut wtxn = self.index.write_txn()?;
+        self.index_page_to(page, &self.active_index)
+    }
+
+    fn swap_indicies(&mut self) -> Result<()> {
+        tracing::debug!("Swapping indicies",);
+        let old_path = self.active_path.parent().unwrap().join("old");
+        std::fs::rename(&self.active_path, &old_path)?;
+        std::fs::rename(&self.staging_path, &self.active_path)?;
+        std::fs::rename(&old_path, &self.staging_path)?;
+        self.active_index = create_or_open_index(&self.active_path)?;
+        self.staging_index = create_or_open_index(&self.staging_path)?;
+        Ok(())
+    }
+
+    fn clear_staging(&self) -> Result<()> {
+        tracing::debug!("Clear out staging");
+        let mut wtxn = self.staging_index.write_txn()?;
+        let clear = ClearDocuments::new(&mut wtxn, &self.staging_index);
+        clear.execute()?;
+        wtxn.commit()?;
+        Ok(())
+    }
+
+    fn index_page_to(&self, page: &Page, index: &Index) -> Result<()> {
+        tracing::debug!(
+            "Indexing page {}",
+            page.title.clone().unwrap_or(page.id.to_string())
+        );
+        let mut wtxn = index.write_txn()?;
         let config = IndexerConfig::default();
         let indexing_config = IndexDocumentsConfig::default();
 
@@ -106,14 +191,8 @@ impl SearchIndex {
 
         let vector = batch.into_inner().unwrap();
         let reader = DocumentsBatchReader::from_reader(Cursor::new(vector))?;
-        let builder = IndexDocuments::new(
-            &mut wtxn,
-            &self.index,
-            &config,
-            indexing_config,
-            |_| (),
-            || false,
-        )?;
+        let builder =
+            IndexDocuments::new(&mut wtxn, index, &config, indexing_config, |_| (), || false)?;
 
         let (builder, _) = builder.add_documents(reader)?;
         builder.execute()?;

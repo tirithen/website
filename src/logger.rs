@@ -8,7 +8,7 @@ pub fn init_logging(config: &Config) -> Result<()> {
     std::fs::create_dir_all(log_path)?;
 
     let stdout_log = fmt::layer()
-        .with_target(false)
+        .with_target(true)
         .with_level(true)
         .with_ansi(atty::is(atty::Stream::Stdout));
 

@@ -9,6 +9,7 @@ use std::{
 use thiserror::Error;
 use time::OffsetDateTime;
 use ulid::Ulid;
+use walkdir::WalkDir;
 use xxhash_rust::xxh3::xxh3_128;
 
 use crate::config::load_config;
@@ -43,7 +44,7 @@ pub enum PageError {
 
 impl Page {
     pub fn read(path: impl Into<PathBuf>) -> Result<Self, PageError> {
-        let path = path.into();
+        let path = Self::get_full_path(path)?;
         let content = fs::read_to_string(&path)?;
         let modified = fs::metadata(&path)?.modified()?;
 
@@ -87,6 +88,60 @@ impl Page {
         );
         fs::write(path, content)?;
         Ok(())
+    }
+
+    pub fn all() -> impl Iterator<Item = Page> {
+        let pages_root = load_config().pages_path();
+        WalkDir::new(pages_root)
+            .follow_links(true)
+            .into_iter()
+            .filter_map(|entry| {
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(_) => return None,
+                };
+
+                if !entry.file_type().is_file() || entry.path().extension()? != "md" {
+                    return None;
+                }
+
+                match Page::read(entry.path()) {
+                    Ok(page) => Some(page),
+                    Err(_) => None,
+                }
+            })
+    }
+
+    fn get_full_path(url_path: impl Into<PathBuf>) -> Result<PathBuf, PageError> {
+        let path: PathBuf = url_path.into();
+        let mut path = path.to_string_lossy().to_string();
+
+        if path.is_empty() {
+            path = "/".into();
+        }
+
+        if path.ends_with("/") {
+            path.push_str("index.md");
+        } else if !path.ends_with(".md") {
+            path.push_str(".md");
+        }
+        path = path
+            .strip_prefix("/")
+            .map(|p| p.into())
+            .unwrap_or(path.clone());
+
+        let config = load_config();
+        let pages_root = config.pages_path();
+        let file_path = pages_root.join(&path).canonicalize()?;
+
+        if !file_path.starts_with(&pages_root) {
+            return Err(PageError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "Path is outside data root",
+            )));
+        }
+
+        Ok(file_path)
     }
 
     fn extract_header_title(document: &Html) -> Option<String> {
@@ -137,9 +192,7 @@ impl Page {
 
     fn path_to_url(path: &Path) -> PathBuf {
         let config = load_config();
-        path.strip_prefix(config.data_path())
-            .unwrap_or(path)
-            .strip_prefix("pages")
+        path.strip_prefix(config.pages_path())
             .unwrap_or(path)
             .with_extension("")
             .to_path_buf()
@@ -167,7 +220,6 @@ Some other text
 "#;
 
         let (fm, md) = Page::split_frontmatter(content).unwrap();
-        dbg!(&fm, &md);
         assert_eq!(fm.title, Some("Test Page".into()));
         assert_eq!(
             fm.tags.unwrap(),

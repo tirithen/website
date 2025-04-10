@@ -1,4 +1,4 @@
-use std::{collections::HashSet, path::PathBuf};
+use std::{collections::HashSet, sync::Arc};
 
 use axum::{
     Router,
@@ -20,7 +20,7 @@ use crate::{
     assets::{ASSET_MANAGER, asset_routes},
     config::{Config, load_config},
     error_handler::error_handler,
-    page::{Page, PageError},
+    page::Page,
     search::SearchIndex,
     security::add_security_headers,
 };
@@ -48,16 +48,7 @@ struct Fragment {
     tags: HashSet<String>,
 }
 
-pub async fn start_server() -> anyhow::Result<()> {
-    let config = load_config();
-
-    let search = SearchIndex::new(&config.data_path().join("search-index"))?;
-
-    dbg!("before");
-    let p = Page::read("players.md")?;
-    dbg!(&p);
-    search.index_page(&p)?;
-
+pub async fn start_server(config: &Config, search_index: SearchIndex) -> anyhow::Result<()> {
     let compression_layer = CompressionLayer::new()
         .gzip(true)
         .deflate(true)
@@ -66,7 +57,7 @@ pub async fn start_server() -> anyhow::Result<()> {
 
     let app = Router::new()
         .merge(asset_routes())
-        .merge(search.search_route())
+        .merge(search_index.search_route())
         .route("/", get(page_handler).layer(CacheLayer::with_lifespan(1)))
         .route(
             "/{*path}",
@@ -76,6 +67,7 @@ pub async fn start_server() -> anyhow::Result<()> {
         .layer(middleware::from_fn(add_security_headers))
         .layer(middleware::from_fn(add_performance_headers))
         .layer(compression_layer);
+
     let address = format!("0.0.0.0:{}", config.port());
     let listener = tokio::net::TcpListener::bind(&address).await?;
 
@@ -89,8 +81,8 @@ async fn page_handler(
     path: Option<Path<String>>,
     Query(query): Query<QueryParams>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let config = load_config();
-    let page = page_content(path, &config)?;
+    let path = path.unwrap_or(Path("/".into())).0;
+    let page = Page::read(path).map_err(|_| StatusCode::NOT_FOUND)?;
 
     if query.mode == Some(Mode::Fragment) {
         let fragment = Fragment {
@@ -102,37 +94,11 @@ async fn page_handler(
         };
         Ok(Json(&fragment).into_response())
     } else {
-        Ok(Html(full_page_html(&page, &config)).into_response())
+        Ok(Html(full_page_html(&page)).into_response())
     }
 }
 
-fn page_content(url_path: Option<Path<String>>, config: &Config) -> Result<Page, StatusCode> {
-    let mut path = url_path.unwrap_or(Path("/".into()));
-    if path.ends_with("/") {
-        path.push_str("index.md");
-    } else {
-        path.push_str(".md");
-    }
-    path = Path(
-        path.strip_prefix("/")
-            .map(|p| p.into())
-            .unwrap_or(path.clone()),
-    );
-
-    let pages_root = config.data_path().join("pages");
-    let file_path = pages_root
-        .join(path.to_string())
-        .canonicalize()
-        .map_err(|_| StatusCode::NOT_FOUND)?;
-
-    if !file_path.starts_with(&pages_root) {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-
-    Page::read(&file_path).map_err(|_| StatusCode::NOT_FOUND)
-}
-
-fn full_page_html(page: &Page, config: &Config) -> String {
+fn full_page_html(page: &Page) -> String {
     format!(
         r#"<!DOCTYPE html>
 <html>
@@ -167,14 +133,15 @@ fn full_page_html(page: &Page, config: &Config) -> String {
         </main>
     </body>
 </html>"#,
-        formulate_title(page, config),
+        formulate_title(page),
         ASSET_MANAGER.hashed_route("styles.css").unwrap_or_default(),
         ASSET_MANAGER.hashed_route("script.js").unwrap_or_default(),
         &page.html
     )
 }
 
-fn formulate_title(page: &Page, config: &Config) -> String {
+fn formulate_title(page: &Page) -> String {
+    let config = load_config();
     if let Some(page_title) = &page.title {
         format!("{} - {}", page_title, config.title())
     } else {
