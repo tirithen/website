@@ -1,4 +1,4 @@
-use std::{collections::HashSet, sync::Arc};
+use std::collections::HashSet;
 
 use axum::{
     Router,
@@ -21,7 +21,7 @@ use crate::{
     config::{Config, load_config},
     error_handler::error_handler,
     page::Page,
-    search::SearchIndex,
+    search::{SearchIndex, search_route},
     security::add_security_headers,
 };
 
@@ -48,7 +48,7 @@ struct Fragment {
     tags: HashSet<String>,
 }
 
-pub async fn start_server(config: &Config, search_index: SearchIndex) -> anyhow::Result<()> {
+pub async fn start_server(config: &Config, search_index: &SearchIndex) -> anyhow::Result<()> {
     let compression_layer = CompressionLayer::new()
         .gzip(true)
         .deflate(true)
@@ -57,7 +57,7 @@ pub async fn start_server(config: &Config, search_index: SearchIndex) -> anyhow:
 
     let app = Router::new()
         .merge(asset_routes())
-        .merge(search_index.search_route())
+        .merge(search_route(search_index))
         .route("/", get(page_handler).layer(CacheLayer::with_lifespan(1)))
         .route(
             "/{*path}",

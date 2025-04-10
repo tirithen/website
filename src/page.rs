@@ -44,7 +44,13 @@ pub enum PageError {
 
 impl Page {
     pub fn read(path: impl Into<PathBuf>) -> Result<Self, PageError> {
-        let path = Self::get_full_path(path)?;
+        let path: PathBuf = path.into();
+        let path = if path.extension().map(|p| p.to_str()) == Some(Some("md")) {
+            path
+        } else {
+            Self::get_full_path(path)?
+        };
+
         let content = fs::read_to_string(&path)?;
         let modified = fs::metadata(&path)?.modified()?;
 

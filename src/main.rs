@@ -16,8 +16,8 @@ mod web;
 #[tokio::main]
 async fn main() -> Result<()> {
     let config = load_config();
-    let search_index = spawn_search_indexer(&config)?;
     init_logging(&config)?;
-    start_server(&config, search_index).await?;
+    let search_index = spawn_search_indexer(&config)?;
+    start_server(&config, &search_index).await?;
     Ok(())
 }

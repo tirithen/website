@@ -13,6 +13,8 @@ pub fn init_logging(config: &Config) -> Result<()> {
         .with_ansi(atty::is(atty::Stream::Stdout));
 
     let file_log = fmt::layer()
+        .with_target(true)
+        .with_level(true)
         .with_ansi(false)
         .with_writer(tracing_appender::rolling::daily(
             config.log_path(),
@@ -31,6 +33,8 @@ pub fn init_logging(config: &Config) -> Result<()> {
         .with(stdout_log)
         .with(file_log)
         .init();
+
+    tracing::info!("📜 Logger setup at level: {}", log_level);
 
     Ok(())
 }

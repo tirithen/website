@@ -2,7 +2,8 @@ use std::{path::PathBuf, str::FromStr, time::Duration};
 
 use cached::proc_macro::cached;
 use derive_getters::Getters;
-use serde::{Deserialize, Serialize};
+use duration_str::deserialize_duration;
+use serde::{Deserialize, Deserializer, Serialize};
 use tracing::Level;
 
 #[cached]
@@ -11,8 +12,8 @@ pub fn load_config() -> Config {
         .unwrap_or(PathBuf::from_str("./config").unwrap())
         .join("website/config.toml");
 
-    println!(
-        "🔧 Loading config from {} (if exists)",
+    print!(
+        "🔧 Loading config from {} (if exists)...",
         config_path.to_string_lossy()
     );
 
@@ -20,9 +21,11 @@ pub fn load_config() -> Config {
     if let Ok(data) = std::fs::read_to_string(config_path) {
         match toml::from_str::<ConfigParsed>(&data) {
             Ok(parsed) => {
+                println!(" found and loaded!");
                 config = Some(Config::from(parsed));
             }
             Err(error) => {
+                println!();
                 eprintln!("💥 Failed to parse config: {error}");
             }
         };
@@ -42,7 +45,21 @@ pub struct ConfigParsed {
     port: Option<u16>,
     data_path: Option<PathBuf>,
     log_level: Option<ConfigLogLevel>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_option_duration",
+        skip_serializing_if = "Option::is_none"
+    )]
     search_reindex_interval: Option<Duration>,
+}
+
+fn deserialize_option_duration<'de, D>(deserializer: D) -> Result<Option<Duration>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s: Option<String> = Option::deserialize(deserializer)?;
+    s.map(|s| duration_str::parse(&s).map_err(serde::de::Error::custom))
+        .transpose()
 }
 
 #[derive(Clone, Getters, Serialize)]
@@ -78,15 +95,17 @@ impl From<ConfigParsed> for Config {
                     .unwrap_or(PathBuf::from_str("./data").unwrap())
                     .join("website/"),
             ),
-            log_level: ConfigLogLevel::Info,
-            search_reindex_interval: Duration::from_secs(30 * 60),
+            log_level: value.log_level.unwrap_or(ConfigLogLevel::Info),
+            search_reindex_interval: value
+                .search_reindex_interval
+                .unwrap_or(Duration::from_secs(30 * 60)),
         }
     }
 }
 
 #[repr(usize)]
 #[derive(Default, Copy, Clone, Debug, Hash, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename(deserialize = "lowercase", serialize = "lowercase"))]
+#[serde(rename_all = "lowercase")]
 pub enum ConfigLogLevel {
     #[default]
     Error,
