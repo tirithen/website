@@ -4,10 +4,15 @@ use anyhow::Result;
 use axum::{Router, extract::Query, response::Html, routing::get};
 use heed::EnvOpenOptions;
 use milli::{
-    Index, Search, SearchResult,
+    DefaultSearchLogger, FormatOptions, GeoSortStrategy, Index, MatcherBuilder, MatchingWords,
+    SearchContext, TermsMatchingStrategy, TimeBudget,
     documents::{DocumentsBatchBuilder, DocumentsBatchReader},
+    execute_search, filtered_universe,
+    score_details::ScoringStrategy,
+    tokenizer::TokenizerBuilder,
     update::{ClearDocuments, IndexDocuments, IndexDocumentsConfig, IndexerConfig, Settings},
 };
+use roaring::RoaringBitmap;
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::{sync::RwLock, time::interval};
@@ -57,8 +62,8 @@ pub struct SearchIndex {
 
 impl SearchIndex {
     pub fn new(path: &Path) -> Result<Self> {
-        let active_path = path.join("alpha");
-        let staging_path = path.join("beta");
+        let active_path = path.join("active");
+        let staging_path = path.join("staging");
         let active_index = create_or_open_index(&active_path)?;
         let staging_index = create_or_open_index(&staging_path)?;
 
@@ -94,18 +99,49 @@ impl SearchIndex {
         tracing::debug!("Searching with query: {}", query);
         let read_guard = self.active_index.read().await;
         let rtxn = read_guard.read_txn()?;
+        let mut ctx = SearchContext::new(&read_guard, &rtxn)?;
+        let universe = filtered_universe(ctx.index, ctx.txn, &None)?;
+        let search_result = execute_search(
+            &mut ctx,
+            Some(query),
+            TermsMatchingStrategy::Last,
+            ScoringStrategy::Detailed,
+            false,
+            universe,
+            &None,
+            &None,
+            GeoSortStrategy::default(),
+            0,
+            10,
+            Some(10),
+            &mut DefaultSearchLogger,
+            &mut DefaultSearchLogger,
+            TimeBudget::default(),
+            None,
+            None,
+        )?;
 
-        let mut search = Search::new(&rtxn, &read_guard);
-        search.query(query);
-        search.limit(10);
+        let document_ids = search_result.documents_ids;
 
-        let results: SearchResult = search.execute()?;
-        let documents = read_guard.documents(&rtxn, results.documents_ids)?;
+        let matching_words =
+            MatchingWords::new(ctx, search_result.located_query_terms.unwrap_or_default());
+        let tokenizer = TokenizerBuilder::default().into_tokenizer();
+        let mut matcher_builder = MatcherBuilder::new(matching_words, tokenizer);
+        matcher_builder.highlight_prefix("<mark>".to_string());
+        matcher_builder.highlight_suffix("</mark>".to_string());
+
+        let format_options = FormatOptions {
+            highlight: true,
+            crop: Some(20),
+        };
+
+        let documents = read_guard.documents(&rtxn, document_ids)?;
         let fields_map = read_guard.fields_ids_map(&rtxn)?;
 
         let mut output = Vec::new();
         for (_id, obkv_doc) in documents.iter() {
             let mut doc = serde_json::Map::new();
+
             for (field_id, value_bytes) in obkv_doc.iter() {
                 let field_name = if let Some(name) = fields_map.name(field_id) {
                     name
@@ -115,8 +151,21 @@ impl SearchIndex {
 
                 let value: Value = serde_json::from_slice(value_bytes)?;
 
-                doc.insert(field_name.to_string(), value);
+                if field_name == "markdown" && value.is_string() {
+                    let text = value.as_str().unwrap();
+                    let mut matcher = matcher_builder.build(text, None);
+                    let formatted_text = matcher.format(format_options);
+
+                    doc.insert(field_name.to_string(), value.clone());
+                    doc.insert(
+                        "_formatted_markdown".to_string(),
+                        Value::String(formatted_text.into_owned()),
+                    );
+                } else {
+                    doc.insert(field_name.to_string(), value);
+                }
             }
+
             output.push(Value::Object(doc));
         }
 
@@ -184,7 +233,7 @@ fn create_or_open_index(path: &Path) -> Result<Arc<RwLock<Index>>> {
     std::fs::create_dir_all(path)?;
 
     let mut options = EnvOpenOptions::new();
-    options.map_size(100 * 1024 * 1024);
+    options.map_size(1024 * 1024 * 1024);
     options.max_dbs(1);
     let options = options.read_txn_without_tls();
     let index = Index::new(options, path, true)?;
@@ -192,7 +241,8 @@ fn create_or_open_index(path: &Path) -> Result<Arc<RwLock<Index>>> {
     let mut wtxn = index.write_txn()?;
     let config = IndexerConfig::default();
     let mut builder = Settings::new(&mut wtxn, &index, &config);
-    builder.set_searchable_fields(vec!["title".into(), "markdown".into()]);
+    builder.set_primary_key("id".into());
+    builder.set_searchable_fields(vec!["title".into(), "markdown".into(), "tags".into()]);
     builder.execute(|_| (), || false)?;
     wtxn.commit()?;
 
@@ -222,7 +272,7 @@ fn render_search_results(query: String, results: Vec<serde_json::Value>) -> Html
                 .map(|v| v.to_string())
                 .unwrap_or_default(),
             result
-                .get("markdown")
+                .get("_formatted_markdown")
                 .map(|v| v.to_string())
                 .unwrap_or_default(),
         );
