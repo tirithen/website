@@ -12,7 +12,7 @@ use milli::{
     tokenizer::TokenizerBuilder,
     update::{ClearDocuments, IndexDocuments, IndexDocumentsConfig, IndexerConfig, Settings},
 };
-use roaring::RoaringBitmap;
+use rayon::iter::ParallelIterator;
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::{sync::RwLock, time::interval};
@@ -79,18 +79,60 @@ impl SearchIndex {
 
         self.clear_staging().await?;
 
-        let mut count = 0;
-        for page in Page::all() {
-            self.index_page_to(&page, &self.staging_index).await?;
-            count += 1;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1000);
+
+        let producer = tokio::task::spawn_blocking(move || {
+            Page::all()
+                .filter_map(|page| {
+                    let _ = tx.blocking_send(page);
+                    Some(())
+                })
+                .count()
+        });
+
+        let mut batch = Vec::with_capacity(100);
+        let mut timeout = tokio::time::interval(tokio::time::Duration::from_secs(1));
+        let mut total = 0;
+
+        loop {
+            tokio::select! {
+                // Receive pages with priority on filling batches
+                biased;
+                page = rx.recv() => {
+                    if let Some(page) = page {
+                        batch.push(page);
+                        total += 1;
+
+                        if batch.len() >= 100 {
+                            self.commit_batch(batch, &self.staging_index).await?;
+                            batch = Vec::with_capacity(100);
+                        }
+                    } else {
+                        break; // Channel closed
+                    }
+                },
+                // Fallback: commit partial batch every second
+                _ = timeout.tick() => {
+                    if !batch.is_empty() {
+                        self.commit_batch(batch, &self.staging_index).await?;
+                        batch = Vec::with_capacity(100);
+                    }
+                }
+            }
         }
+
+        if !batch.is_empty() {
+            self.commit_batch(batch, &self.staging_index).await?;
+        }
+
+        let _ = producer.await?;
 
         let mut active_index_guard = self.active_index.write().await;
         let mut staging_index_guard = self.staging_index.write().await;
         std::mem::swap(&mut *active_index_guard, &mut *staging_index_guard);
 
         let delta = start.elapsed()?;
-        tracing::info!("\tIndexed {} pages in {:?}", count, delta);
+        tracing::info!("\tIndexed {} pages in {:?}", total, delta);
 
         Ok(())
     }
@@ -172,8 +214,8 @@ impl SearchIndex {
         Ok(output)
     }
 
-    pub async fn index_page(&self, page: &Page) -> Result<()> {
-        self.index_page_to(page, &self.active_index).await
+    pub async fn index_page(&self, page: Page) -> Result<()> {
+        self.commit_batch(vec![page], &self.active_index).await
     }
 
     async fn clear_staging(&self) -> Result<()> {
@@ -186,42 +228,43 @@ impl SearchIndex {
         Ok(())
     }
 
-    async fn index_page_to(&self, page: &Page, index: &RwLock<Index>) -> Result<()> {
-        tracing::debug!(
-            "Indexing page {}",
-            page.title.clone().unwrap_or(page.id.to_string())
-        );
+    async fn commit_batch(&self, batch: Vec<Page>, index: &RwLock<Index>) -> Result<()> {
+        tracing::debug!("Indexing batch of {} pages", batch.len());
         let write_guard = index.write().await;
         let mut wtxn = write_guard.write_txn()?;
+
         let config = IndexerConfig::default();
         let indexing_config = IndexDocumentsConfig::default();
+        let mut builder = DocumentsBatchBuilder::new(Vec::new());
 
-        let mut batch = DocumentsBatchBuilder::new(Vec::new());
-        batch.append_json_object(
-            serde_json::json!({
-                "id": page.id.to_string(),
-                "title": page.title,
-                "markdown": page.markdown,
-                "modified": page.modified,
-                "url": page.url,
-                "tags": page.tags
-            })
-            .as_object()
-            .unwrap(),
-        )?;
+        for page in batch {
+            builder.append_json_object(
+                serde_json::json!({
+                    "id": page.id.to_string(),
+                    "title": page.title,
+                    "markdown": page.markdown,
+                    "modified": page.modified,
+                    "url": page.url,
+                    "tags": page.tags
+                })
+                .as_object()
+                .unwrap(),
+            )?;
+        }
 
-        let vector = batch.into_inner().unwrap();
+        let vector = builder.into_inner().unwrap();
         let reader = DocumentsBatchReader::from_reader(Cursor::new(vector))?;
-        let builder = IndexDocuments::new(
+
+        let (builder, _) = IndexDocuments::new(
             &mut wtxn,
             &write_guard,
             &config,
             indexing_config,
             |_| (),
             || false,
-        )?;
+        )?
+        .add_documents(reader)?;
 
-        let (builder, _) = builder.add_documents(reader)?;
         builder.execute()?;
         wtxn.commit()?;
 

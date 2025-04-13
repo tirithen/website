@@ -1,15 +1,17 @@
-use pulldown_cmark::{Parser, html};
-use scraper::{Html, Selector};
-use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
     fs,
     path::{Path, PathBuf},
 };
+
+use jwalk::WalkDir;
+use pulldown_cmark::{Parser, html};
+use rayon::iter::{ParallelBridge, ParallelIterator};
+use scraper::{Html, Selector};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use time::OffsetDateTime;
 use ulid::Ulid;
-use walkdir::WalkDir;
 use xxhash_rust::xxh3::xxh3_128;
 
 use crate::config::load_config;
@@ -79,7 +81,7 @@ impl Page {
         })
     }
 
-    pub fn write(&self, base_path: &Path) -> Result<(), PageError> {
+    pub async fn write(&self, base_path: &Path) -> Result<(), PageError> {
         let path = base_path.join(&self.url).with_extension("md");
         let frontmatter = toml::to_string(&Frontmatter {
             id: Some(Ulid::new()),
@@ -96,25 +98,22 @@ impl Page {
         Ok(())
     }
 
-    pub fn all() -> impl Iterator<Item = Page> {
+    pub fn all() -> impl ParallelIterator<Item = Self> + Send {
         let pages_root = load_config().pages_path();
         WalkDir::new(pages_root)
+            .skip_hidden(true)
             .follow_links(true)
             .into_iter()
-            .filter_map(|entry| {
-                let entry = match entry {
-                    Ok(e) => e,
-                    Err(_) => return None,
-                };
+            .par_bridge()
+            .filter_map(|dir_entry_result| {
+                let dir_entry = dir_entry_result.ok()?;
+                let path = dir_entry.path().canonicalize().ok()?;
 
-                if !entry.file_type().is_file() || entry.path().extension()? != "md" {
+                if !path.is_file() || path.extension() != Some("md".as_ref()) {
                     return None;
                 }
 
-                match Page::read(entry.path()) {
-                    Ok(page) => Some(page),
-                    Err(_) => None,
-                }
+                Some(Page::read(path).ok()?)
             })
     }
 
@@ -138,7 +137,7 @@ impl Page {
 
         let config = load_config();
         let pages_root = config.pages_path();
-        let file_path = pages_root.join(&path).canonicalize()?;
+        let file_path = fs::canonicalize(pages_root.join(&path))?;
 
         if !file_path.starts_with(&pages_root) {
             return Err(PageError::Io(std::io::Error::new(
