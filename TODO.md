@@ -1,7 +1,8 @@
 # TODO
 
-- [ ] Periodic re-indexation of pages. Keep search online during re-index.
-- [ ] Re-index individual files when changed via debounced notify crate.
+- [x] Periodic re-indexation of pages. Keep search online during re-index.
+- [x] Re-index individual files when changed via debounced notify crate.
+      (reindex all pages for now as simpler and still fast)
 - [ ] Fetch only fragment when requesting a new page, to prevent full page
       reload.
 - [ ] Use crate askama for templating.
@@ -11,3 +12,6 @@
       it also muse be spam free. 
 - [ ] Server sent events to notify user if the page viewing has changed to
       refresh that page.
+- [ ] Build a sitemap.
+- [ ] Add publish date to frontmatter format, and return 404 for unbublished
+      pages.

@@ -2,7 +2,6 @@ use std::{path::PathBuf, str::FromStr, time::Duration};
 
 use cached::proc_macro::cached;
 use derive_getters::Getters;
-use duration_str::deserialize_duration;
 use serde::{Deserialize, Deserializer, Serialize};
 use tracing::Level;
 
@@ -98,7 +97,7 @@ impl From<ConfigParsed> for Config {
             log_level: value.log_level.unwrap_or(ConfigLogLevel::Info),
             search_reindex_interval: value
                 .search_reindex_interval
-                .unwrap_or(Duration::from_secs(30 * 60)),
+                .unwrap_or(Duration::from_secs(3600)),
         }
     }
 }

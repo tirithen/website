@@ -2,6 +2,7 @@ use std::{
     fs,
     io::Cursor,
     path::{Path, PathBuf},
+    str::FromStr,
     sync::Arc,
     time::SystemTime,
 };
@@ -18,34 +19,93 @@ use milli::{
     tokenizer::TokenizerBuilder,
     update::{ClearDocuments, IndexDocuments, IndexDocumentsConfig, IndexerConfig, Settings},
 };
+use notify::{RecommendedWatcher, RecursiveMode};
+use notify_debouncer_full::{DebouncedEvent, Debouncer, RecommendedCache, new_debouncer};
 use rayon::iter::ParallelIterator;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::{sync::RwLock, time::interval};
+use tokio::{
+    sync::{RwLock, mpsc},
+    task::JoinHandle,
+    time::interval,
+};
+use ulid::Ulid;
 
 use crate::{assets::ASSET_MANAGER, config::Config, page::Page};
 
-pub async fn spawn_search_indexer(config: &Config) -> Result<Arc<RwLock<SearchIndex>>> {
+pub async fn spawn_search_indexer(
+    config: &Config,
+) -> Result<(
+    Arc<RwLock<SearchIndex>>,
+    Debouncer<RecommendedWatcher, RecommendedCache>,
+    JoinHandle<()>,
+)> {
     let search_index = Arc::new(RwLock::new(SearchIndex::new(&config.search_path())?));
-    let search_index_background = search_index.clone();
+    let search_index_watch = search_index.clone();
+    let search_index_periodic = search_index.clone();
     let duration = *config.search_reindex_interval();
+
+    let (sender, mut receiver) = mpsc::channel(1);
+    // let sender_inner = sender.clone();
+    let mut debouncer: Debouncer<RecommendedWatcher, RecommendedCache> = new_debouncer(
+        std::time::Duration::from_millis(30),
+        Some(std::time::Duration::from_millis(30)),
+        move |res: Result<Vec<DebouncedEvent>, _>| match res {
+            Ok(events) => {
+                for event in events {
+                    if !event.kind.is_access() {
+                        if let Err(e) = sender.try_send(event) {
+                            tracing::error!("💥 Failed to notify about file changes: {:?}", e);
+                        }
+                        break;
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!("💥 Debouncer error: {:?}", e);
+            }
+        },
+    )?;
+
+    debouncer.watch(config.pages_path(), RecursiveMode::Recursive)?;
+    tracing::info!(
+        "🔎 Watching pages for changes at path: {}",
+        config.pages_path().to_string_lossy()
+    );
+
+    let watcher = tokio::spawn(async move {
+        loop {
+            if receiver.recv().await.is_some() {
+                tracing::info!("📁 Filesystem change detected, triggering reindex");
+                if let Err(e) = search_index_watch.write().await.reindex().await {
+                    tracing::error!("💥 Filesystem-triggered reindex failed: {}", e);
+                }
+                if let Err(e) = search_index_watch.write().await.swap_indexes().await {
+                    tracing::error!("💥 Swapping indexes failed: {}", e);
+                }
+            } else {
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            }
+        }
+    });
 
     tokio::spawn(async move {
         let mut interval = interval(duration);
         interval.tick().await;
 
         loop {
-            if let Err(e) = search_index_background.read().await.reindex().await {
+            tracing::info!("⏰ Periodic reindex triggered");
+            if let Err(e) = search_index_periodic.read().await.reindex().await {
                 tracing::error!("💥 Periodic reindex failed: {}", e);
             }
-            if let Err(e) = search_index_background.write().await.swap_indexes().await {
+            if let Err(e) = search_index_periodic.write().await.swap_indexes().await {
                 tracing::error!("💥 Swapping indexes failed: {}", e);
             }
             interval.tick().await;
         }
     });
 
-    Ok(search_index)
+    Ok((search_index, debouncer, watcher))
 }
 
 pub fn search_route(search_index: Arc<RwLock<SearchIndex>>) -> Router {
@@ -54,13 +114,13 @@ pub fn search_route(search_index: Arc<RwLock<SearchIndex>>) -> Router {
         "/search",
         get(async move |Query(params): Query<SearchParams>| {
             let query = params.q;
-            let results = search_index
+            let hits = search_index
                 .read()
                 .await
                 .search(&query)
                 .await
                 .unwrap_or_else(|_| Vec::new());
-            render_search_results(query, results)
+            render_search_results(query, hits)
         }),
     )
 }
@@ -103,7 +163,7 @@ impl SearchIndex {
         })
     }
 
-    pub async fn search(&self, query: &str) -> Result<Vec<serde_json::Value>> {
+    pub async fn search(&self, query: &str) -> Result<Vec<SearchHit>> {
         tracing::debug!("Searching with query: {}", query);
         let rtxn = self.active_index.read_txn()?;
         let mut ctx = SearchContext::new(&self.active_index, &rtxn)?;
@@ -173,7 +233,9 @@ impl SearchIndex {
                 }
             }
 
-            output.push(Value::Object(doc));
+            if let Ok(hit) = SearchHit::try_from(Value::Object(doc)) {
+                output.push(hit);
+            }
         }
 
         Ok(output)
@@ -396,14 +458,82 @@ fn symlink(original: &PathBuf, link: &PathBuf) -> std::io::Result<()> {
     std::os::windows::fs::symlink_dir(original, link)
 }
 
+#[derive(Debug, Serialize)]
+pub struct SearchHit {
+    id: Ulid,
+    url: PathBuf,
+    title: String,
+    excerpt: String,
+}
+
+impl TryFrom<serde_json::Value> for SearchHit {
+    type Error = anyhow::Error;
+
+    fn try_from(value: serde_json::Value) -> std::result::Result<Self, Self::Error> {
+        let id = value
+            .get("id")
+            .map(|v| v.as_str())
+            .unwrap_or(Some(""))
+            .unwrap_or_default();
+        let url = value
+            .get("url")
+            .map(|v| v.as_str())
+            .unwrap_or(Some(""))
+            .unwrap_or_default();
+        let title = value
+            .get("title")
+            .map(|v| v.as_str())
+            .unwrap_or(Some(""))
+            .unwrap_or_default();
+        let excerpt = value
+            .get("_formatted_markdown")
+            .map(|v| v.as_str())
+            .unwrap_or(Some(""))
+            .unwrap_or_default();
+
+        Ok(Self {
+            id: Ulid::from_str(id)?,
+            url: PathBuf::from_str(url)?,
+            title: title.into(),
+            excerpt: clean_excerpt(excerpt),
+        })
+    }
+}
+
+fn clean_excerpt(input: &str) -> String {
+    let parser = pulldown_cmark::Parser::new(input);
+    let mut plain_text = String::new();
+
+    for event in parser {
+        match event {
+            pulldown_cmark::Event::Text(text) => plain_text.push_str(&text),
+            pulldown_cmark::Event::Code(code) => plain_text.push_str(&code),
+            _ => {}
+        }
+
+        plain_text.push(' ');
+    }
+
+    plain_text = plain_text
+        .replace("<!--", "")
+        .replace("-->", "")
+        .replace("[", "")
+        .replace("]", "")
+        .replace("<", "")
+        .replace(">", "");
+
+    plain_text
+}
+
 #[derive(Deserialize)]
 struct SearchParams {
     q: String,
 }
 
-fn render_search_results(query: String, results: Vec<serde_json::Value>) -> Html<String> {
+fn render_search_results(query: String, hits: Vec<SearchHit>) -> Html<String> {
     let mut results_html = String::new();
-    for result in &results {
+
+    for hit in &hits {
         let result_html = format!(
             r#"
             <article class="search-result">
@@ -413,15 +543,9 @@ fn render_search_results(query: String, results: Vec<serde_json::Value>) -> Html
                 <p>{}</p>
             </article>
         "#,
-            result.get("url").map(|v| v.to_string()).unwrap_or_default(),
-            result
-                .get("title")
-                .map(|v| v.to_string())
-                .unwrap_or_default(),
-            result
-                .get("_formatted_markdown")
-                .map(|v| v.to_string())
-                .unwrap_or_default(),
+            hit.url.to_string_lossy(),
+            hit.title,
+            hit.excerpt,
         );
         results_html.push_str(&result_html);
     }
@@ -456,6 +580,14 @@ fn render_search_results(query: String, results: Vec<serde_json::Value>) -> Html
     </head>
     <body>
         <main>
+            <search>
+                <form method="get" action="/search">
+                    <label for="search">
+                    <input id="search" type="search" name="q" value="{}">
+                    <button>Search</button>
+                </form>
+            </search>
+
             <h1>Search results for: {}</h1>
             <p>Found {} results</p>
             <ol class="search-results">{}</ol>
@@ -466,7 +598,8 @@ fn render_search_results(query: String, results: Vec<serde_json::Value>) -> Html
         ASSET_MANAGER.hashed_route("styles.css").unwrap_or_default(),
         ASSET_MANAGER.hashed_route("script.js").unwrap_or_default(),
         &query,
-        results.len(),
+        &query,
+        hits.len(),
         results_html
     );
 

@@ -28,6 +28,7 @@ use crate::{
 
 #[derive(Debug, Deserialize)]
 struct QueryParams {
+    q: Option<String>,
     mode: Option<Mode>,
 }
 
@@ -98,11 +99,11 @@ async fn page_handler(
         };
         Ok(Json(&fragment).into_response())
     } else {
-        Ok(Html(full_page_html(&page)).into_response())
+        Ok(Html(full_page_html(&page, query.q)).into_response())
     }
 }
 
-fn full_page_html(page: &Page) -> String {
+fn full_page_html(page: &Page, query: Option<String>) -> String {
     format!(
         r#"<!DOCTYPE html>
 <html>
@@ -133,6 +134,13 @@ fn full_page_html(page: &Page) -> String {
     </head>
     <body>
         <main>
+            <search>
+                <form method="get" action="/search">
+                    <label for="search">
+                    <input id="search" type="search" name="q" value="{}">
+                    <button>Search</button>
+                </form>
+            </search>
             <article>{}</article>
         </main>
     </body>
@@ -140,6 +148,7 @@ fn full_page_html(page: &Page) -> String {
         formulate_title(page),
         ASSET_MANAGER.hashed_route("styles.css").unwrap_or_default(),
         ASSET_MANAGER.hashed_route("script.js").unwrap_or_default(),
+        &query.unwrap_or_default(),
         &page.html
     )
 }
