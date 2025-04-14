@@ -603,7 +603,7 @@ fn render_search_results(query: String, hits: Vec<SearchHit>) -> Html<String> {
 
             <h1>Search results for: {}</h1>
             <p>Found {} results</p>
-            <ol class="search-results">{}</ol>
+            {}
         </main>
     </body>
 </html>"#,
