@@ -7,9 +7,11 @@ use std::{
     time::SystemTime,
 };
 
+use ammonia::Builder;
 use anyhow::Result;
 use axum::{Router, extract::Query, response::Html, routing::get};
 use heed::EnvOpenOptions;
+use lazy_static::lazy_static;
 use milli::{
     DefaultSearchLogger, FormatOptions, GeoSortStrategy, Index, MatcherBuilder, MatchingWords,
     SearchContext, TermsMatchingStrategy, TimeBudget,
@@ -21,6 +23,7 @@ use milli::{
 };
 use notify::{RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{DebouncedEvent, Debouncer, RecommendedCache, new_debouncer};
+use pulldown_cmark::{Event, Options, Parser};
 use rayon::iter::ParallelIterator;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -194,8 +197,8 @@ impl SearchIndex {
             MatchingWords::new(ctx, search_result.located_query_terms.unwrap_or_default());
         let tokenizer = TokenizerBuilder::default().into_tokenizer();
         let mut matcher_builder = MatcherBuilder::new(matching_words, tokenizer);
-        matcher_builder.highlight_prefix("<mark>".to_string());
-        matcher_builder.highlight_suffix("</mark>".to_string());
+        matcher_builder.highlight_prefix("⚇".to_string());
+        matcher_builder.highlight_suffix("⚉".to_string());
 
         let format_options = FormatOptions {
             highlight: true,
@@ -495,34 +498,44 @@ impl TryFrom<serde_json::Value> for SearchHit {
             id: Ulid::from_str(id)?,
             url: PathBuf::from_str(url)?,
             title: title.into(),
-            excerpt: clean_excerpt(excerpt),
+            excerpt: format_excerpt(excerpt),
         })
     }
 }
 
-fn clean_excerpt(input: &str) -> String {
-    let parser = pulldown_cmark::Parser::new(input);
+lazy_static! {
+    static ref EXCERPT_AMMONIA_CLEANER: Builder<'static> = {
+        let mut builder = Builder::new();
+        builder
+            .tags(std::iter::once("mark").collect())
+            .strip_comments(true)
+            .link_rel(None)
+            .allowed_classes(std::collections::HashMap::new());
+        builder
+    };
+}
+
+fn format_excerpt(input: &str) -> String {
+    let parser = Parser::new(input);
     let mut plain_text = String::new();
 
     for event in parser {
         match event {
-            pulldown_cmark::Event::Text(text) => plain_text.push_str(&text),
-            pulldown_cmark::Event::Code(code) => plain_text.push_str(&code),
-            _ => {}
+            Event::Text(text) | Event::Code(text) | Event::Html(text) => {
+                plain_text.push_str(&text);
+                plain_text.push(' ');
+            }
+            _ => (),
         }
-
-        plain_text.push(' ');
     }
 
-    plain_text = plain_text
-        .replace("<!--", "")
-        .replace("-->", "")
-        .replace("[", "")
-        .replace("]", "")
-        .replace("<", "")
-        .replace(">", "");
+    // Format hit markers
+    plain_text = plain_text.replace("⚇", "<mark>").replace("⚉", "</mark>");
 
-    plain_text
+    // Drop characters
+    plain_text = plain_text.replace(['[', ']'], "");
+
+    EXCERPT_AMMONIA_CLEANER.clean(&plain_text).to_string()
 }
 
 #[derive(Deserialize)]
