@@ -98,7 +98,7 @@ impl Page {
         Ok(())
     }
 
-    pub fn all() -> impl ParallelIterator<Item = Self> + Send {
+    pub fn all() -> impl ParallelIterator<Item = Self> {
         let pages_root = load_config().pages_path();
         WalkDir::new(pages_root)
             .skip_hidden(true)
@@ -113,7 +113,7 @@ impl Page {
                     return None;
                 }
 
-                Some(Page::read(path).ok()?)
+                Page::read(path).ok()
             })
     }
 

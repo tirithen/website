@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
 
 use axum::{
     Router,
@@ -13,6 +13,7 @@ use axum_response_cache::CacheLayer;
 use hyper::header;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
+use tokio::sync::RwLock;
 use tower_http::compression::CompressionLayer;
 use ulid::Ulid;
 
@@ -48,7 +49,10 @@ struct Fragment {
     tags: HashSet<String>,
 }
 
-pub async fn start_server(config: &Config, search_index: &SearchIndex) -> anyhow::Result<()> {
+pub async fn start_server(
+    config: &Config,
+    search_index: Arc<RwLock<SearchIndex>>,
+) -> anyhow::Result<()> {
     let compression_layer = CompressionLayer::new()
         .gzip(true)
         .deflate(true)

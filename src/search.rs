@@ -1,4 +1,10 @@
-use std::{io::Cursor, path::Path, sync::Arc, time::SystemTime};
+use std::{
+    fs,
+    io::Cursor,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::SystemTime,
+};
 
 use anyhow::Result;
 use axum::{Router, extract::Query, response::Html, routing::get};
@@ -19,9 +25,9 @@ use tokio::{sync::RwLock, time::interval};
 
 use crate::{assets::ASSET_MANAGER, config::Config, page::Page};
 
-pub fn spawn_search_indexer(config: &Config) -> Result<SearchIndex> {
-    let search_index = SearchIndex::new(&config.search_path())?;
-    let mut search_index_background = search_index.clone();
+pub async fn spawn_search_indexer(config: &Config) -> Result<Arc<RwLock<SearchIndex>>> {
+    let search_index = Arc::new(RwLock::new(SearchIndex::new(&config.search_path())?));
+    let search_index_background = search_index.clone();
     let duration = *config.search_reindex_interval();
 
     tokio::spawn(async move {
@@ -29,8 +35,11 @@ pub fn spawn_search_indexer(config: &Config) -> Result<SearchIndex> {
         interval.tick().await;
 
         loop {
-            if let Err(e) = search_index_background.reindex().await {
+            if let Err(e) = search_index_background.read().await.reindex().await {
                 tracing::error!("💥 Periodic reindex failed: {}", e);
+            }
+            if let Err(e) = search_index_background.write().await.swap_indexes().await {
+                tracing::error!("💥 Swapping indexes failed: {}", e);
             }
             interval.tick().await;
         }
@@ -39,13 +48,15 @@ pub fn spawn_search_indexer(config: &Config) -> Result<SearchIndex> {
     Ok(search_index)
 }
 
-pub fn search_route(search_index: &SearchIndex) -> Router {
-    let search_index = search_index.clone();
+pub fn search_route(search_index: Arc<RwLock<SearchIndex>>) -> Router {
+    let search_index = search_index;
     Router::new().route(
         "/search",
         get(async move |Query(params): Query<SearchParams>| {
             let query = params.q;
             let results = search_index
+                .read()
+                .await
                 .search(&query)
                 .await
                 .unwrap_or_else(|_| Vec::new());
@@ -54,94 +65,48 @@ pub fn search_route(search_index: &SearchIndex) -> Router {
     )
 }
 
-#[derive(Clone)]
 pub struct SearchIndex {
-    active_index: Arc<RwLock<Index>>,
-    staging_index: Arc<RwLock<Index>>,
+    active_index: Index,
+    staging_index: Index,
+    active_path: PathBuf,
+    staging_path: PathBuf,
+    alpha_path: PathBuf,
+    beta_path: PathBuf,
 }
 
 impl SearchIndex {
     pub fn new(path: &Path) -> Result<Self> {
         let active_path = path.join("active");
         let staging_path = path.join("staging");
+        let alpha_path = path.join("alpha");
+        let beta_path = path.join("beta");
+
+        fs::create_dir_all(&alpha_path)?;
+        fs::create_dir_all(&beta_path)?;
+
+        if !active_path.exists() {
+            symlink(&alpha_path, &active_path)?;
+            let _ = fs::remove_file(&staging_path);
+            symlink(&beta_path, &staging_path)?;
+        }
+
         let active_index = create_or_open_index(&active_path)?;
         let staging_index = create_or_open_index(&staging_path)?;
 
         Ok(Self {
             active_index,
             staging_index,
+            active_path,
+            staging_path,
+            alpha_path,
+            beta_path,
         })
-    }
-
-    pub async fn reindex(&mut self) -> Result<()> {
-        tracing::info!("🔎 Indexing all pages...");
-        let start = SystemTime::now();
-
-        self.clear_staging().await?;
-
-        let (tx, mut rx) = tokio::sync::mpsc::channel(1000);
-
-        let producer = tokio::task::spawn_blocking(move || {
-            Page::all()
-                .filter_map(|page| {
-                    let _ = tx.blocking_send(page);
-                    Some(())
-                })
-                .count()
-        });
-
-        let mut batch = Vec::with_capacity(100);
-        let mut timeout = tokio::time::interval(tokio::time::Duration::from_secs(1));
-        let mut total = 0;
-
-        loop {
-            tokio::select! {
-                // Receive pages with priority on filling batches
-                biased;
-                page = rx.recv() => {
-                    if let Some(page) = page {
-                        batch.push(page);
-                        total += 1;
-
-                        if batch.len() >= 100 {
-                            self.commit_batch(batch, &self.staging_index).await?;
-                            batch = Vec::with_capacity(100);
-                        }
-                    } else {
-                        break; // Channel closed
-                    }
-                },
-                // Fallback: commit partial batch every second
-                _ = timeout.tick() => {
-                    if !batch.is_empty() {
-                        self.commit_batch(batch, &self.staging_index).await?;
-                        batch = Vec::with_capacity(100);
-                    }
-                }
-            }
-        }
-
-        if !batch.is_empty() {
-            self.commit_batch(batch, &self.staging_index).await?;
-        }
-
-        let _ = producer.await?;
-
-        let mut active_index_guard = self.active_index.write().await;
-        let mut staging_index_guard = self.staging_index.write().await;
-        std::mem::swap(&mut *active_index_guard, &mut *staging_index_guard);
-
-        let delta = start.elapsed()?;
-        tracing::info!("\tIndexed {} pages in {:?}", total, delta);
-
-        Ok(())
     }
 
     pub async fn search(&self, query: &str) -> Result<Vec<serde_json::Value>> {
         tracing::debug!("Searching with query: {}", query);
-        let read_guard = self.active_index.read().await;
-        let rtxn = read_guard.read_txn()?;
-        let mut ctx = SearchContext::new(&read_guard, &rtxn)?;
+        let rtxn = self.active_index.read_txn()?;
+        let mut ctx = SearchContext::new(&self.active_index, &rtxn)?;
         let universe = filtered_universe(ctx.index, ctx.txn, &None)?;
         let search_result = execute_search(
             &mut ctx,
@@ -177,8 +142,8 @@ impl SearchIndex {
             crop: Some(20),
         };
 
-        let documents = read_guard.documents(&rtxn, document_ids)?;
-        let fields_map = read_guard.fields_ids_map(&rtxn)?;
+        let documents = self.active_index.documents(&rtxn, document_ids)?;
+        let fields_map = self.active_index.fields_ids_map(&rtxn)?;
 
         let mut output = Vec::new();
         for (_id, obkv_doc) in documents.iter() {
@@ -218,20 +183,127 @@ impl SearchIndex {
         self.commit_batch(vec![page], &self.active_index).await
     }
 
+    async fn reindex(&self) -> Result<()> {
+        tracing::info!("🔎 Indexing all pages...");
+        let start = SystemTime::now();
+
+        self.clear_staging().await?;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1000);
+
+        let producer = tokio::task::spawn_blocking(move || {
+            Page::all()
+                .filter_map(|page| {
+                    let _ = tx.blocking_send(page);
+                    Some(())
+                })
+                .count()
+        });
+
+        let mut batch = Vec::with_capacity(100);
+        let mut timeout = tokio::time::interval(tokio::time::Duration::from_secs(1));
+        let mut total = 0;
+
+        loop {
+            tokio::select! {
+                biased;
+                page = rx.recv() => {
+                    if let Some(page) = page {
+                        batch.push(page);
+                        total += 1;
+
+                        if batch.len() >= 100 {
+                            self.commit_batch(batch, &self.staging_index).await?;
+                            batch = Vec::with_capacity(100);
+                        }
+                    } else {
+                        break;                    }
+                },
+                _ = timeout.tick() => {
+                    if !batch.is_empty() {
+                        self.commit_batch(batch, &self.staging_index).await?;
+                        batch = Vec::with_capacity(100);
+                    }
+                }
+            }
+        }
+
+        if !batch.is_empty() {
+            self.commit_batch(batch, &self.staging_index).await?;
+        }
+
+        let _ = producer.await?;
+
+        let delta = start.elapsed()?;
+        tracing::info!("\tIndexed {} pages in {:?}", total, delta);
+
+        Ok(())
+    }
+
+    async fn swap_indexes(&mut self) -> Result<()> {
+        tracing::debug!("Swapping active and staging indexes");
+
+        let _ = remove_dummy_index(&self.active_path);
+        let old_active_index = std::mem::replace(
+            &mut self.active_index,
+            create_dummy_index(&self.active_path)?,
+        );
+        let event = old_active_index.prepare_for_closing();
+        event.wait();
+
+        let _ = remove_dummy_index(&self.staging_path);
+        let old_staging_index = std::mem::replace(
+            &mut self.staging_index,
+            create_dummy_index(&self.staging_path)?,
+        );
+        let event = old_staging_index.prepare_for_closing();
+        event.wait();
+
+        let alpha_is_active = self.active_path.canonicalize()? == self.alpha_path;
+
+        let _ = fs::remove_file(&self.active_path);
+        let _ = fs::remove_file(&self.staging_path);
+
+        if alpha_is_active {
+            symlink(&self.beta_path, &self.active_path)?;
+            symlink(&self.alpha_path, &self.staging_path)?;
+        } else {
+            symlink(&self.alpha_path, &self.active_path)?;
+            symlink(&self.beta_path, &self.staging_path)?;
+        }
+
+        let dummy_active_index = std::mem::replace(
+            &mut self.active_index,
+            create_or_open_index(&self.active_path)?,
+        );
+        let event = dummy_active_index.prepare_for_closing();
+        event.wait();
+        remove_dummy_index(&self.active_path)?;
+
+        let dummy_staging_index = std::mem::replace(
+            &mut self.staging_index,
+            create_or_open_index(&self.staging_path)?,
+        );
+        let event = dummy_staging_index.prepare_for_closing();
+        event.wait();
+        remove_dummy_index(&self.staging_path)?;
+
+        tracing::debug!("Index swap completed successfully");
+        Ok(())
+    }
+
     async fn clear_staging(&self) -> Result<()> {
         tracing::debug!("Clear out staging");
-        let write_guard = self.staging_index.write().await;
-        let mut wtxn = write_guard.write_txn()?;
-        let clear = ClearDocuments::new(&mut wtxn, &write_guard);
+        let mut wtxn = self.staging_index.write_txn()?;
+        let clear = ClearDocuments::new(&mut wtxn, &self.staging_index);
         clear.execute()?;
         wtxn.commit()?;
         Ok(())
     }
 
-    async fn commit_batch(&self, batch: Vec<Page>, index: &RwLock<Index>) -> Result<()> {
+    async fn commit_batch(&self, batch: Vec<Page>, index: &Index) -> Result<()> {
         tracing::debug!("Indexing batch of {} pages", batch.len());
-        let write_guard = index.write().await;
-        let mut wtxn = write_guard.write_txn()?;
+        let mut wtxn = index.write_txn()?;
 
         let config = IndexerConfig::default();
         let indexing_config = IndexDocumentsConfig::default();
@@ -255,15 +327,9 @@ impl SearchIndex {
         let vector = builder.into_inner().unwrap();
         let reader = DocumentsBatchReader::from_reader(Cursor::new(vector))?;
 
-        let (builder, _) = IndexDocuments::new(
-            &mut wtxn,
-            &write_guard,
-            &config,
-            indexing_config,
-            |_| (),
-            || false,
-        )?
-        .add_documents(reader)?;
+        let (builder, _) =
+            IndexDocuments::new(&mut wtxn, index, &config, indexing_config, |_| (), || false)?
+                .add_documents(reader)?;
 
         builder.execute()?;
         wtxn.commit()?;
@@ -272,14 +338,24 @@ impl SearchIndex {
     }
 }
 
-fn create_or_open_index(path: &Path) -> Result<Arc<RwLock<Index>>> {
-    std::fs::create_dir_all(path)?;
+fn create_or_open_index(path: &Path) -> Result<Index> {
+    fs::create_dir_all(path)?;
 
     let mut options = EnvOpenOptions::new();
     options.map_size(1024 * 1024 * 1024);
     options.max_dbs(1);
+    options.max_readers(512);
     let options = options.read_txn_without_tls();
-    let index = Index::new(options, path, true)?;
+    let options_spare = options.clone();
+
+    let index_result = Index::new(options, path, true);
+    let index = if let Ok(i) = index_result {
+        i
+    } else {
+        fs::remove_dir_all(path)?;
+        fs::create_dir_all(path)?;
+        Index::new(options_spare, path, true)?
+    };
 
     let mut wtxn = index.write_txn()?;
     let config = IndexerConfig::default();
@@ -289,7 +365,35 @@ fn create_or_open_index(path: &Path) -> Result<Arc<RwLock<Index>>> {
     builder.execute(|_| (), || false)?;
     wtxn.commit()?;
 
-    Ok(Arc::new(RwLock::new(index)))
+    Ok(index)
+}
+
+fn create_dummy_index(path: &Path) -> Result<Index> {
+    let path = path.with_extension("dummy");
+    std::fs::create_dir_all(&path)?;
+
+    let mut options = EnvOpenOptions::new();
+    options.map_size(1024 * 1024);
+    let options = options.read_txn_without_tls();
+    let index = Index::new(options, path, true)?;
+
+    Ok(index)
+}
+
+fn remove_dummy_index(path: &Path) -> Result<()> {
+    let path = path.with_extension("dummy");
+    std::fs::remove_dir_all(&path)?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn symlink(original: &PathBuf, link: &PathBuf) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(original, link)
+}
+
+#[cfg(target_os = "windows")]
+fn symlink(original: &PathBuf, link: &PathBuf) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_dir(original, link)
 }
 
 #[derive(Deserialize)]

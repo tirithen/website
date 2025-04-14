@@ -17,7 +17,7 @@ mod web;
 async fn main() -> Result<()> {
     let config = load_config();
     init_logging(&config)?;
-    let search_index = spawn_search_indexer(&config)?;
-    start_server(&config, &search_index).await?;
+    let search_index = spawn_search_indexer(&config).await?;
+    start_server(&config, search_index).await?;
     Ok(())
 }
