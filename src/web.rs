@@ -1,4 +1,4 @@
-use std::{collections::HashSet, sync::Arc};
+use std::collections::HashSet;
 
 use axum::{
     Router,
@@ -13,7 +13,6 @@ use axum_response_cache::CacheLayer;
 use hyper::header;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
-use tokio::sync::RwLock;
 use tower_http::compression::CompressionLayer;
 use ulid::Ulid;
 
@@ -22,13 +21,11 @@ use crate::{
     config::{Config, load_config},
     error_handler::error_handler,
     page::Page,
-    search::{SearchIndex, search_route},
     security::add_security_headers,
 };
 
 #[derive(Debug, Deserialize)]
 struct QueryParams {
-    q: Option<String>,
     mode: Option<Mode>,
 }
 
@@ -50,10 +47,7 @@ struct Fragment {
     tags: HashSet<String>,
 }
 
-pub async fn start_server(
-    config: &Config,
-    search_index: Arc<RwLock<SearchIndex>>,
-) -> anyhow::Result<()> {
+pub async fn start_server(config: &Config) -> anyhow::Result<()> {
     let compression_layer = CompressionLayer::new()
         .gzip(true)
         .deflate(true)
@@ -62,7 +56,6 @@ pub async fn start_server(
 
     let app = Router::new()
         .merge(asset_routes())
-        .merge(search_route(search_index))
         .route("/", get(page_handler).layer(CacheLayer::with_lifespan(1)))
         .route(
             "/{*path}",
@@ -99,11 +92,11 @@ async fn page_handler(
         };
         Ok(Json(&fragment).into_response())
     } else {
-        Ok(Html(full_page_html(&page, query.q)).into_response())
+        Ok(Html(full_page_html(&page)).into_response())
     }
 }
 
-fn full_page_html(page: &Page, query: Option<String>) -> String {
+fn full_page_html(page: &Page) -> String {
     format!(
         r#"<!DOCTYPE html>
 <html lang="en-US">
@@ -134,13 +127,6 @@ fn full_page_html(page: &Page, query: Option<String>) -> String {
     </head>
     <body>
         <main>
-            <search>
-                <form method="get" action="/search">
-                    <label for="search">Search</label>
-                    <input id="search" type="search" name="q" value="{}">
-                    <button>Search</button>
-                </form>
-            </search>
             <article>{}</article>
         </main>
     </body>
@@ -148,7 +134,6 @@ fn full_page_html(page: &Page, query: Option<String>) -> String {
         formulate_title(page),
         ASSET_MANAGER.hashed_route("styles.css").unwrap_or_default(),
         ASSET_MANAGER.hashed_route("script.js").unwrap_or_default(),
-        &query.unwrap_or_default(),
         &page.html
     )
 }

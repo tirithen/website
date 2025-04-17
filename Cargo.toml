@@ -1,6 +1,6 @@
 [package]
 name = "website"
-version = "0.1.0"
+version = "0.2.0"
 description = "A self contained website creator and server with zero conf simplicity."
 authors = ["Fredrik Söderström <tirithen@gmail.com>"]
 license = "GPL-3.0-or-later"
@@ -28,7 +28,6 @@ heed = "0.22.0"
 hyper = "1.6.0"
 jwalk = "0.8.1"
 lazy_static = "1.5.0"
-milli = { git = "https://github.com/meilisearch/meilisearch", rev = "a0bfcf88725fc131877cbde1059432b34a5d822f", package = "milli" }
 moka = { version = "0.12.10", features = ["future"] }
 notify = "8.0.0"
 notify-debouncer-full = "0.5.0"
@@ -44,7 +43,7 @@ serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 serde_yaml = "0.9.34"
 thiserror = "2.0.12"
-time = "0.3.41"
+time = { version = "0.3.41", features = ["serde"] }
 tokio = { version = "1.44.1", features = ["full"] }
 toml = "0.8.20"
 tower-http = { version = "0.6.2", features = ["compression-full", "fs", "set-header"] }

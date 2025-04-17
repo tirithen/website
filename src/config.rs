@@ -1,8 +1,8 @@
-use std::{path::PathBuf, str::FromStr, time::Duration};
+use std::{path::PathBuf, str::FromStr};
 
 use cached::proc_macro::cached;
 use derive_getters::Getters;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use tracing::Level;
 
 #[cached]
@@ -44,21 +44,6 @@ pub struct ConfigParsed {
     port: Option<u16>,
     data_path: Option<PathBuf>,
     log_level: Option<ConfigLogLevel>,
-    #[serde(
-        default,
-        deserialize_with = "deserialize_option_duration",
-        skip_serializing_if = "Option::is_none"
-    )]
-    search_reindex_interval: Option<Duration>,
-}
-
-fn deserialize_option_duration<'de, D>(deserializer: D) -> Result<Option<Duration>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let s: Option<String> = Option::deserialize(deserializer)?;
-    s.map(|s| duration_str::parse(&s).map_err(serde::de::Error::custom))
-        .transpose()
 }
 
 #[derive(Clone, Getters, Serialize)]
@@ -67,7 +52,6 @@ pub struct Config {
     port: u16,
     data_path: PathBuf,
     log_level: ConfigLogLevel,
-    search_reindex_interval: Duration,
 }
 
 impl Config {
@@ -77,10 +61,6 @@ impl Config {
 
     pub fn pages_path(&self) -> PathBuf {
         self.data_path.join("pages")
-    }
-
-    pub fn search_path(&self) -> PathBuf {
-        self.data_path.join("search")
     }
 }
 
@@ -95,9 +75,6 @@ impl From<ConfigParsed> for Config {
                     .join("website/"),
             ),
             log_level: value.log_level.unwrap_or(ConfigLogLevel::Info),
-            search_reindex_interval: value
-                .search_reindex_interval
-                .unwrap_or(Duration::from_secs(3600)),
         }
     }
 }

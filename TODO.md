@@ -1,7 +1,8 @@
 # TODO
 
-- [x] Periodic re-indexation of pages. Keep search online during re-index.
-- [x] Re-index individual files when changed via debounced notify crate.
+- [ ] Import milli core crate (currently out of date on crates.io)
+- [ ] Periodic re-indexation of pages. Keep search online during re-index.
+- [ ] Re-index individual files when changed via debounced notify crate.
       (reindex all pages for now as simpler and still fast)
 - [ ] Add main navigation menu and header/sidebar.
 - [ ] Use lol_html to prettify HTML before sending response.
