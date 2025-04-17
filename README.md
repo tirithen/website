@@ -20,7 +20,7 @@ and cargo installed](https://www.rust-lang.org/learn/get-started) on your
 system.
 
 ```bash
-$ cargo install website
+$ cargo install --git https://github.com/tirithen/website.git
 $ website
 ```
 
