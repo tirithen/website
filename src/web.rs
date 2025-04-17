@@ -106,7 +106,7 @@ async fn page_handler(
 fn full_page_html(page: &Page, query: Option<String>) -> String {
     format!(
         r#"<!DOCTYPE html>
-<html>
+<html lang="en-US">
     <head>
         <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
         <meta http-equiv="X-UA-Compatible" content="IE=Edge">
@@ -136,7 +136,7 @@ fn full_page_html(page: &Page, query: Option<String>) -> String {
         <main>
             <search>
                 <form method="get" action="/search">
-                    <label for="search">
+                    <label for="search">Search</label>
                     <input id="search" type="search" name="q" value="{}">
                     <button>Search</button>
                 </form>

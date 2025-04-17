@@ -23,7 +23,7 @@ use milli::{
 };
 use notify::{RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{DebouncedEvent, Debouncer, RecommendedCache, new_debouncer};
-use pulldown_cmark::{Event, Options, Parser};
+use pulldown_cmark::{Event, Parser};
 use rayon::iter::ParallelIterator;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -256,7 +256,7 @@ impl SearchIndex {
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(1000);
 
-        let producer = tokio::task::spawn_blocking(move || {
+        let producer = tokio::task::spawn_blocking(async move || {
             Page::all()
                 .filter_map(|page| {
                     let _ = tx.blocking_send(page);
@@ -550,9 +550,9 @@ fn render_search_results(query: String, hits: Vec<SearchHit>) -> Html<String> {
         let result_html = format!(
             r#"
             <article class="search-result">
-                <h3>
+                <h2>
                     <a href="{}">{}</a>
-                </h3>
+                </h2>
                 <p>{}</p>
             </article>
         "#,
@@ -565,7 +565,7 @@ fn render_search_results(query: String, hits: Vec<SearchHit>) -> Html<String> {
 
     let html = format!(
         r#"<!DOCTYPE html>
-<html>
+<html lang="en-US">
     <head>
         <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
         <meta http-equiv="X-UA-Compatible" content="IE=Edge">
@@ -595,7 +595,7 @@ fn render_search_results(query: String, hits: Vec<SearchHit>) -> Html<String> {
         <main>
             <search>
                 <form method="get" action="/search">
-                    <label for="search">
+                    <label for="search">Search</label>
                     <input id="search" type="search" name="q" value="{}">
                     <button>Search</button>
                 </form>
