@@ -1,7 +1,17 @@
 [package]
 name = "website"
 version = "0.1.0"
+description = "A self contained website creator and server with zero conf simplicity."
+authors = ["Fredrik Söderström <tirithen@gmail.com>"]
+license = "GPL-3.0-or-later"
 edition = "2024"
+rust-version = "1.86"
+readme = "README.md"
+homepage = "https://github.com/tirithen/website"
+repository = "https://github.com/tirithen/website"
+documentation = "https://docs.rs/website"
+keywords = ["website", "web", "webserver"]
+categories = ["web-programming", "web-programming::http-server"]
 
 [dependencies]
 ammonia = "4.0.0"
